@@ -18,18 +18,25 @@ This project focuses on multi-modal image aesthetic assessment (MIAA) and vision
 - EMD distribution visualization with GT, Pred, and Overlap
 
 
-## Exeperiment results
-![MIAA](figures/Miaa.png)
-
-![VIAA](figures/Viaa.png)
-
-![EMD visualization](figures/visualization.png)
-
 ## Results Of Different Data Preprocessing Methods
+
+
 ![MIAA](figures/preprocessing_miaa.png)
 
 ![VIAA](figures/preprocessing_viaa.png)
+
+
+## Exeperiment results
+![MIAA](figures/Miaa.png)
+
+
+![VIAA](figures/Viaa.png)
+
+
+![EMD visualization](figures/visualization.png)
+
 ## Environment
+
 
 ```bash
 conda create -n aesformer python=3.9
