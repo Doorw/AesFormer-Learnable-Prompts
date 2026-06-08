@@ -1,0 +1,62 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Dataset and LMDB
+data/
+data2/
+*.lmdb
+*.mdb
+*.lock
+
+# Checkpoints and model weights
+checkpoints/
+ckp/
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.safetensors
+
+# Results and logs
+results/
+runs/
+logs/
+*.log
+log_test.txt
+
+# Visualization output
+vis_results/
+outputs/
+originals/
+processed/
+panels/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+pretrained/
+checkpoints/
+ckp/
+*.pth
+*.pt
+*.bin
+*.safetensors
+*.lmdb
+data/
+data2/
+results/
+__pycache__/
+*.pyc
+.vscode/

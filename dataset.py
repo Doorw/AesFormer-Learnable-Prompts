@@ -1,5 +1,8 @@
 import os
 import re
+import lmdb
+import pickle
+import io
 from torchvision import transforms as T
 import pandas as pd
 import numpy as np
@@ -153,7 +156,105 @@ class AVA_Comment_Dataset_bert(Dataset):
 
         return caption
 
-
+class AVA_Comment_LMDB_Dataset(Dataset):
+    """从LMDB读取数据的Dataset类"""
+    
+    def __init__(self, lmdb_path, if_train=True, transform=None):
+        self.env = lmdb.open(
+            lmdb_path, 
+            readonly=True, 
+            lock=False, 
+            readahead=False, 
+            meminit=False,
+            subdir=False
+        )
+        
+        # 获取所有keys
+        with self.env.begin() as txn:
+            self.keys = list(txn.cursor().iternext(values=False))
+            self.keys = [k.decode() for k in self.keys]
+        
+        # 设置transform
+        if transform:
+            self.transform = transform
+        else:
+            if if_train:
+                self.transform = T.Compose([
+            #     T.RandomResizedCrop(
+            #     size=224,
+            #     scale=(0.90, 1.00),
+            #     ratio=(0.95, 1.05),
+            #     interpolation=T.InterpolationMode.BICUBIC
+            #      ), 
+                # T.RandomCrop((224, 224), padding=16, padding_mode='reflect'),
+             
+            #    T.Resize((256, 256), interpolation=T.InterpolationMode.BICUBIC),
+                T.RandomHorizontalFlip(p=0.5),
+            #    T.RandomCrop((224, 224)),
+                T.ToTensor(),
+                T.Normalize([0.485, 0.456, 0.406],
+                            [0.229, 0.224, 0.225])
+             ])
+            else:
+                self.transform = T.Compose([
+                    # T.Resize((224, 224), interpolation=T.InterpolationMode.BICUBIC),
+                    # T.CenterCrop((224, 224)),
+                    T.ToTensor(),
+                    T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+                ])
+    
+    def __len__(self):
+        return len(self.keys)
+    
+    def __getitem__(self, idx):
+        key = self.keys[idx].encode()
+        
+        with self.env.begin() as txn:
+            data = pickle.loads(txn.get(key))
+        
+        # 解包数据
+        img_bytes, caption, label_str = data
+        
+        # 加载图片
+        img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+        img = self.transform(img)
+        
+        # 处理标签
+        scores = [float(x) for x in label_str.split()]
+        y = np.array(scores, dtype=np.float32)
+        p = y / y.sum()  # 归一化为概率分布
+        
+        # 预处理caption
+        caption = self.pre_caption(caption)
+        
+        return img, caption, p.astype(np.float32)
+    
+    def pre_caption(self, caption, max_words=200):
+        """预处理评论"""
+        if not isinstance(caption, str):
+            caption = str(caption) if caption else ""
+        
+        caption = re.sub(
+            r"[\[(\'\"()*#:~)\]]",
+            ' ',
+            caption,
+        )
+        caption = caption.replace('\\n', ' ')
+        caption = re.sub(r"\s{2,}", ' ', caption)
+        caption = caption.strip(' ')
+        
+        # 截断
+        caption_words = caption.split(' ')
+        if len(caption_words) > max_words:
+            caption = ' '.join(caption_words[:max_words])
+        
+        return caption
+    
+    def __del__(self):
+        """清理LMDB环境"""
+        if hasattr(self, 'env') and self.env:
+            self.env.close()
+            
 class AVA_Comment_Dataset_vit_bert(Dataset):
     def __init__(self, path_to_csv, images_path, if_train):
         self.df = pd.read_csv(path_to_csv)

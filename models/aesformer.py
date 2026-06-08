@@ -8,7 +8,7 @@ from torch.nn import functional as F
 from einops import rearrange
 
 import torch
-import torch.nn as nn
+import torch.nn as nn   
 from timm.models.layers import trunc_normal_
 from .swin import SwinTransformer
 
@@ -25,7 +25,7 @@ class img_feature(nn.Module):
                                              num_classes=10, drop_path_rate=0.1)
 
         # swin ckpt
-        d = torch.load('', map_location='cpu')
+        d = torch.load('checkpoints/swin/swin_base_patch4_window7_224.pth', map_location='cpu')
         print(self.img_model.load_state_dict(d['model'], strict=False))
 
     def forward(self, image):
@@ -40,7 +40,7 @@ class img_feature(nn.Module):
 class bert_feature(nn.Module):
     def __init__(self, device):
         # bert ckpt
-        checkpoint = '/data2/yuhao/pretrain_model/bert'
+        checkpoint = 'ckp/zzd/pretrain_model/bert/models--bert-base-uncased/snapshots/86b5e0934494bd15c9632b12f734a8a67f723594'
         # hugging face
         # checkpoint = "bert-base-cased"
         super().__init__()
@@ -281,6 +281,18 @@ class Swin_Bert_vlmo_clip_mean_score_multi_features(nn.Module):
         )
         self.init_weights(self.adapter_4)
 
+        self.num_quality_prompts = 5
+        self.prompt_temperature = 0.07
+        self.quality_prompt_embeddings = nn.Parameter(torch.randn(self.num_quality_prompts, dim))
+        trunc_normal_(self.quality_prompt_embeddings, std=0.02)
+        self.prompt_fusion = nn.Sequential(
+            nn.Linear(2 * dim + self.num_quality_prompts, dim),
+            nn.LayerNorm(dim),
+            nn.GELU(),
+            nn.Dropout(dropout)
+        )
+        self.init_weights(self.prompt_fusion[0])
+
         self.feature_vit = img_feature(model_type=model_type)
         if self.model_type == 'base':
             self.norm_v = nn.LayerNorm(dim)
@@ -300,6 +312,76 @@ class Swin_Bert_vlmo_clip_mean_score_multi_features(nn.Module):
                     p.requires_grad = False
 
         self.feature = bert_feature(device=device)
+        for p in self.feature.bert_model.parameters():
+            p.requires_grad = False
+
+        self.prompt_ctx_len = 32
+        self.quality_categories = ["terrible", "bad", "average", "good", "perfect"]
+        self.prompt_loss_temperature = 0.07
+        self.lambda_prompt = 0.01
+        self.prompt_gate = nn.Parameter(torch.tensor(0.1))
+
+        self.prompt_context = nn.Parameter(torch.randn(self.num_quality_prompts, self.prompt_ctx_len, dim))
+        trunc_normal_(self.prompt_context, std=0.02)
+
+        self.prompt_cross_attn = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=8,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.prompt_cross_norm1 = nn.LayerNorm(dim)
+        self.prompt_cross_norm2 = nn.LayerNorm(dim)
+        self.prompt_cross_ffn = nn.Sequential(
+            nn.Linear(dim, dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim * 4, dim),
+            nn.Dropout(dropout)
+        )
+        self.prompt_cross_gate = nn.Parameter(torch.tensor(0.5))
+
+        self.prompt_token_cross_attn = nn.MultiheadAttention(
+            embed_dim=dim,
+            num_heads=8,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.prompt_token_cross_norm1 = nn.LayerNorm(dim)
+        self.prompt_token_cross_norm2 = nn.LayerNorm(dim)
+        self.prompt_token_cross_ffn = nn.Sequential(
+            nn.Linear(dim, dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim * 4, dim),
+            nn.Dropout(dropout)
+        )
+        self.prompt_token_cross_gate = nn.Parameter(torch.tensor(0.5))
+
+        self._init_weights(self.prompt_cross_norm1)
+        self._init_weights(self.prompt_cross_norm2)
+        self.init_weights(self.prompt_cross_ffn[0])
+        self.init_weights(self.prompt_cross_ffn[3])
+        self._init_weights(self.prompt_token_cross_norm1)
+        self._init_weights(self.prompt_token_cross_norm2)
+        self.init_weights(self.prompt_token_cross_ffn[0])
+        self.init_weights(self.prompt_token_cross_ffn[3])
+
+        print("prompt_cross_gate.requires_grad:", self.prompt_cross_gate.requires_grad)
+        print("prompt_cross_gate:", self.prompt_cross_gate.item())
+        print("prompt_token_cross_gate.requires_grad:", self.prompt_token_cross_gate.requires_grad)
+        print("prompt_token_cross_gate:", self.prompt_token_cross_gate.item())
+
+        anchor_tokens = self.feature.tokenizer(
+            self.quality_categories,
+            padding=True,
+            truncation=True,
+            add_special_tokens=False,
+            return_tensors="pt"
+        )
+        self.register_buffer("quality_anchor_input_ids", anchor_tokens["input_ids"])
+        self.register_buffer("quality_anchor_attention_mask", anchor_tokens["attention_mask"])
+
         self.cross_encoder = copy.deepcopy(self.feature.bert_model.base_model.encoder.layer[12-depth:])
         self.vlmo_neck = pretrain_neck(self.cross_encoder, depth, type=self.type)
 
@@ -353,7 +435,7 @@ class Swin_Bert_vlmo_clip_mean_score_multi_features(nn.Module):
                     image_embeds_m = self.proj_m(image_embeds_m)
                 image_embeds_m = self.norm_cl_m(image_embeds_m)  # B L C
                 image_embeds_m = self.avgpool(image_embeds_m.transpose(1, 2))  # B C 1
-                image_embeds_m = torch.flatten(image_embeds_m, 1)
+                image_embeds_m = torch.flatten(image_embeds_m, 1)# B C 
                 image_feat_m = F.normalize(image_embeds_m, dim=-1)
                 image_feat_all = torch.cat([image_feat_m.t(), self.image_queue.clone().detach()], dim=1)
                 text_embeds_m, _ = self.text_encoder_m(text)
@@ -367,7 +449,7 @@ class Swin_Bert_vlmo_clip_mean_score_multi_features(nn.Module):
 
                 sim_targets = torch.zeros(sim_i2t_m.size()).to(image.device)
                 sim_targets.fill_diagonal_(1)
-
+    
                 sim_i2t_targets = sim_targets
                 sim_t2i_targets = sim_targets
 
@@ -433,6 +515,252 @@ class Swin_Bert_vlmo_clip_mean_score_multi_features(nn.Module):
         x = self.head_v(image_feature)
         return x
 
+    # def fuse_with_learnable_quality_prompts(self, image_feature):
+    #     image_norm = F.normalize(image_feature, dim=-1)
+    #     prompt_norm = F.normalize(self.quality_prompt_embeddings, dim=-1)
+    #     similarity_scores = image_norm @ prompt_norm.t()  # [B, 5]
+    #     weights = torch.softmax(similarity_scores / self.prompt_temperature, dim=-1)
+    #     weighted_prompt_feature = weights @ self.quality_prompt_embeddings  # [B, dim]
+    #     fused_feature = torch.cat([image_feature, weighted_prompt_feature, similarity_scores], dim=-1)  # [B, 2*dim+5]
+    #     fused_feature = self.prompt_fusion(fused_feature)  # [B, dim]
+    #     return image_feature + fused_feature
+
+    # def train_second_stage_with_learnable_prompts(self, image):
+    #     image_feature = self.feature_vit.get_multi_featues(image)
+    #     f1, f2, f3, f4 = self.feature_neck(image_feature)
+    #     if self.model_type == 'base':
+    #         f1, f2, f3, f4 = self.proj(f1), self.proj(f2), self.proj(f3), self.proj(f4),
+    #     f1 = self.adapter_1(f1) + f1
+    #     f2 = self.adapter_2(f2) + f2
+    #     f3 = self.adapter_3(f3) + f3
+    #     f4 = self.adapter_4(f4) + f4
+    #     image_feature = torch.cat([f1, f2, f3, f4], dim=1)
+
+    #     image_feature, _ = self.vlmo_neck(image_feature, image_feature)
+
+    #     image_feature = self.norm_v(image_feature)  # B L C
+    #     image_feature = self.avgpool(image_feature.transpose(1, 2))  # B C 1
+    #     image_feature = torch.flatten(image_feature, 1)  # [B, dim]
+    #     image_feature = self.fuse_with_learnable_quality_prompts(image_feature)
+
+    #     x = self.head_v(image_feature)
+    #     return x
+
+    def get_anchored_quality_prompt_features(self):
+        device = self.prompt_context.device
+        input_ids = self.quality_anchor_input_ids.to(device)  # [5, L_anchor]
+        anchor_mask = self.quality_anchor_attention_mask.to(device)  # [5, L_anchor]
+
+        word_embeddings = self.feature.bert_model.embeddings.word_embeddings
+        anchor_embeds = word_embeddings(input_ids)  # [5, L_anchor, dim]
+
+        cls_id = self.feature.tokenizer.cls_token_id
+        sep_id = self.feature.tokenizer.sep_token_id
+        cls_ids = torch.full((self.num_quality_prompts, 1), cls_id, dtype=torch.long, device=device)
+        sep_ids = torch.full((self.num_quality_prompts, 1), sep_id, dtype=torch.long, device=device)
+        cls_embeds = word_embeddings(cls_ids)  # [5, 1, dim]
+        sep_embeds = word_embeddings(sep_ids)  # [5, 1, dim]
+
+        inputs_embeds = torch.cat([cls_embeds, self.prompt_context, anchor_embeds, sep_embeds], dim=1)  # [5, 1+M+L_anchor+1, dim]
+
+        cls_mask = torch.ones((self.num_quality_prompts, 1), dtype=anchor_mask.dtype, device=device)
+        ctx_mask = torch.ones((self.num_quality_prompts, self.prompt_ctx_len), dtype=anchor_mask.dtype, device=device)
+        sep_mask = torch.ones((self.num_quality_prompts, 1), dtype=anchor_mask.dtype, device=device)
+        attention_mask = torch.cat([cls_mask, ctx_mask, anchor_mask, sep_mask], dim=1)  # [5, 1+M+L_anchor+1]
+
+        outputs = self.feature.bert_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask
+        )
+        prompt_features = outputs.last_hidden_state[:, 0, :]  # [5, dim]
+        return prompt_features
+
+    def fuse_with_anchored_learnable_quality_prompts(self, image_feature, return_similarity=False):
+        prompt_features = self.get_anchored_quality_prompt_features()  # [5, dim]
+        image_norm = F.normalize(image_feature, dim=-1)
+        prompt_norm = F.normalize(prompt_features, dim=-1)
+        similarity_scores = image_norm @ prompt_norm.t()  # [B, 5]
+        weights = torch.softmax(similarity_scores / self.prompt_temperature, dim=-1)
+        weighted_prompt_feature = weights @ prompt_features  # [B, dim]
+        concat_feature = torch.cat([image_feature, weighted_prompt_feature, similarity_scores], dim=-1)  # [B, 2*dim+5]
+        prompt_delta = self.prompt_fusion(concat_feature)  # [B, dim]
+        fused_feature = image_feature + self.prompt_gate * prompt_delta# [B, dim]
+        #fused_feature = image_feature + prompt_delta  
+        if return_similarity:
+            return fused_feature, similarity_scores
+        return fused_feature
+
+    def train_second_stage_with_anchored_prompts(self, image, return_similarity=False):
+        image_feature = self.feature_vit.get_multi_featues(image)
+        f1, f2, f3, f4 = self.feature_neck(image_feature)
+        if self.model_type == 'base':
+            f1, f2, f3, f4 = self.proj(f1), self.proj(f2), self.proj(f3), self.proj(f4),
+        f1 = self.adapter_1(f1) + f1
+        f2 = self.adapter_2(f2) + f2
+        f3 = self.adapter_3(f3) + f3
+        f4 = self.adapter_4(f4) + f4
+        image_feature = torch.cat([f1, f2, f3, f4], dim=1)
+
+        image_feature, _ = self.vlmo_neck(image_feature, image_feature)
+
+        image_feature = self.norm_v(image_feature)  # B L C
+        image_feature = self.avgpool(image_feature.transpose(1, 2))  # B C 1
+        image_feature = torch.flatten(image_feature, 1)  # [B, dim]
+        if return_similarity:
+            image_feature, similarity_scores = self.fuse_with_anchored_learnable_quality_prompts(
+                image_feature,
+                return_similarity=True
+            )
+        else:
+            image_feature = self.fuse_with_anchored_learnable_quality_prompts(
+                image_feature,
+                return_similarity=False
+            )
+
+        x = self.head_v(image_feature)
+        if return_similarity:
+            return x, similarity_scores
+        return x
+
+    def fuse_with_anchored_prompts_cross_attention(self, image_feature, return_similarity=False):
+        prompt_features = self.get_anchored_quality_prompt_features()  # [5, dim]
+        image_norm = F.normalize(image_feature, dim=-1)
+        prompt_norm = F.normalize(prompt_features, dim=-1)
+        similarity_scores = image_norm @ prompt_norm.t()  # [B, 5]
+
+        B = image_feature.size(0)
+        query = image_feature.unsqueeze(1)  # [B, 1, dim]
+        key_value = prompt_features.unsqueeze(0).expand(B, -1, -1)  # [B, 5, dim]
+
+        attn_out, attn_weights = self.prompt_cross_attn(
+            query=query,
+            key=key_value,
+            value=key_value,
+            need_weights=True
+        )
+        # attn_out: [B, 1, dim], attn_weights: [B, 1, 5]
+
+        query = self.prompt_cross_norm1(query + attn_out)  # [B, 1, dim]
+        ffn_out = self.prompt_cross_ffn(query)  # [B, 1, dim]
+        prompt_delta = self.prompt_cross_norm2(query + ffn_out)  # [B, 1, dim]
+        prompt_delta = prompt_delta.squeeze(1)  # [B, dim]
+
+        fused_feature = image_feature + self.prompt_cross_gate * prompt_delta  # [B, dim]
+        if return_similarity:
+            return fused_feature, similarity_scores, attn_weights
+        return fused_feature
+
+    def fuse_tokens_with_anchored_prompts_cross_attention(self, image_tokens, return_similarity=False, return_attn=False):
+        prompt_features = self.get_anchored_quality_prompt_features()  # [5, dim]
+        image_global = image_tokens.mean(dim=1)  # [B, dim]
+
+        image_norm = F.normalize(image_global, dim=-1)
+        prompt_norm = F.normalize(prompt_features, dim=-1)
+        similarity_scores = image_norm @ prompt_norm.t()  # [B, 5]
+
+        B = image_tokens.size(0)
+        query = image_tokens  # [B, L, dim]
+        key_value = prompt_features.unsqueeze(0).expand(B, -1, -1)  # [B, 5, dim]
+
+        attn_out, attn_weights = self.prompt_token_cross_attn(
+            query=query,
+            key=key_value,
+            value=key_value,
+            need_weights=True
+        )
+        # attn_out: [B, L, dim], attn_weights: [B, L, 5]
+
+        x = self.prompt_token_cross_norm1( attn_out)  # [B, L, dim]
+        ffn_out = self.prompt_token_cross_ffn(x)  # [B, L, dim]
+        prompt_delta = self.prompt_token_cross_norm2(x + ffn_out)  # [B, L, dim]
+        fused_tokens = image_tokens + self.prompt_token_cross_gate * prompt_delta  # [B, L, dim]
+        # fused_tokens = image_tokens + prompt_delta
+
+        if return_similarity and return_attn:
+            return fused_tokens, similarity_scores, attn_weights
+        elif return_similarity:
+            return fused_tokens, similarity_scores
+        return fused_tokens
+
+    def train_second_stage_with_anchored_prompts_cross_attention(self, image, return_similarity=False, return_attn=False):
+        image_feature = self.feature_vit.get_multi_featues(image)
+        f1, f2, f3, f4 = self.feature_neck(image_feature)
+        if self.model_type == 'base':
+            f1, f2, f3, f4 = self.proj(f1), self.proj(f2), self.proj(f3), self.proj(f4),
+        f1 = self.adapter_1(f1) + f1
+        f2 = self.adapter_2(f2) + f2
+        f3 = self.adapter_3(f3) + f3
+        f4 = self.adapter_4(f4) + f4
+        image_feature = torch.cat([f1, f2, f3, f4], dim=1)
+
+        image_feature, _ = self.vlmo_neck(image_feature, image_feature)
+
+        image_feature = self.norm_v(image_feature)  # B L C
+        image_feature = self.avgpool(image_feature.transpose(1, 2))  # B C 1
+        image_feature = torch.flatten(image_feature, 1)  # [B, dim]
+
+        if return_similarity or return_attn:
+            image_feature, similarity_scores, attn_weights = self.fuse_with_anchored_prompts_cross_attention(
+                image_feature,
+                return_similarity=True
+            )
+        else:
+            image_feature = self.fuse_with_anchored_prompts_cross_attention(
+                image_feature,
+                return_similarity=False
+            )
+
+        x = self.head_v(image_feature)  # [B, 10]
+        if return_similarity and return_attn:
+            return x, similarity_scores, attn_weights
+        elif return_similarity:
+            return x, similarity_scores
+        return x
+
+    def train_second_stage_with_anchored_prompts_token_cross_attention(self, image, return_similarity=False, return_attn=False):
+        image_feature = self.feature_vit.get_multi_featues(image)
+        f1, f2, f3, f4 = self.feature_neck(image_feature)
+        if self.model_type == 'base':
+            f1, f2, f3, f4 = self.proj(f1), self.proj(f2), self.proj(f3), self.proj(f4),
+        f1 = self.adapter_1(f1) + f1
+        f2 = self.adapter_2(f2) + f2
+        f3 = self.adapter_3(f3) + f3
+        f4 = self.adapter_4(f4) + f4
+        image_feature = torch.cat([f1, f2, f3, f4], dim=1)  # [B, L, dim]
+
+        image_feature, _ = self.vlmo_neck(image_feature, image_feature)
+
+        image_feature = self.norm_v(image_feature)  # [B, L, dim]
+
+        if return_similarity and return_attn:
+            image_feature, similarity_scores, attn_weights = self.fuse_tokens_with_anchored_prompts_cross_attention(
+                image_feature,
+                return_similarity=True,
+                return_attn=True
+            )
+        elif return_similarity:
+            image_feature, similarity_scores = self.fuse_tokens_with_anchored_prompts_cross_attention(
+                image_feature,
+                return_similarity=True,
+                return_attn=False
+            )
+        else:
+            image_feature = self.fuse_tokens_with_anchored_prompts_cross_attention(
+                image_feature,
+                return_similarity=False,
+                return_attn=False
+            )
+
+        image_feature = self.avgpool(image_feature.transpose(1, 2))  # [B, dim, 1]
+        image_feature = torch.flatten(image_feature, 1)  # [B, dim]
+
+        x = self.head_v(image_feature)  # [B, 10]
+        if return_similarity and return_attn:
+            return x, similarity_scores, attn_weights
+        elif return_similarity:
+            return x, similarity_scores
+        return x
+
     def forward(self, image):
         image_feature = self.feature_vit.get_multi_featues(image)
         f1, f2, f3, f4 = self.feature_neck(image_feature)
@@ -452,6 +780,152 @@ class Swin_Bert_vlmo_clip_mean_score_multi_features(nn.Module):
 
         x = self.head_v(image_feature)
         return x
+
+    def forward_with_learnable_prompts(self, image):
+        return self.train_second_stage_with_learnable_prompts(image)
+
+    def forward_with_anchored_prompts(self, image, return_similarity=False):
+        return self.train_second_stage_with_anchored_prompts(image, return_similarity=return_similarity)
+
+    # Cross-attention version training usage:
+    # y_pred, similarity_scores = model.forward_with_anchored_prompts_cross_attention(
+    #     img,
+    #     return_similarity=True
+    # )
+    # loss_prompt, quality_label, quality_onehot = model.compute_prompt_loss(
+    #     similarity_scores,
+    #     y,
+    #     target_is_distribution=True
+    # )
+    # optimizer = torch.optim.AdamW(
+    #     model.get_anchored_prompt_cross_attention_param_groups(),
+    #     betas=(0.9, 0.99),
+    #     weight_decay=1e-4
+    # )
+    def forward_with_anchored_prompts_cross_attention(self, image, return_similarity=False, return_attn=False):
+        return self.train_second_stage_with_anchored_prompts_cross_attention(
+            image,
+            return_similarity=return_similarity,
+            return_attn=return_attn
+        )
+
+    def forward_with_anchored_prompts_token_cross_attention(self, image, return_similarity=False, return_attn=False):
+        return self.train_second_stage_with_anchored_prompts_token_cross_attention(
+            image,
+            return_similarity=return_similarity,
+            return_attn=return_attn
+        )
+
+    # Training usage example:
+    # pred, similarity_scores = model.forward_with_anchored_prompts(image, return_similarity=True)
+    # loss_main = emd_loss(pred, target_distribution)
+    # loss_prompt, quality_label, quality_onehot = model.compute_prompt_loss(
+    #     similarity_scores,
+    #     target_distribution,
+    #     target_is_distribution=True
+    # )
+    # loss = loss_main + model.lambda_prompt * loss_prompt
+    # If target is MOS score (shape [B]): set target_is_distribution=False.
+    def ava_score_to_quality_label(self, score):
+        quality_label = torch.zeros_like(score, dtype=torch.long)
+        quality_label[(score >= 3) & (score < 5)] = 1
+        quality_label[(score >= 5) & (score < 6)] = 2
+        quality_label[(score >= 6) & (score < 8)] = 3
+        quality_label[score >= 8] = 4
+        return quality_label
+
+    def ava_distribution_to_score(self, target_distribution):
+        target_sum = target_distribution.sum(dim=1, keepdim=True)
+        target_norm = target_distribution / target_sum.clamp_min(1e-6)
+        score_levels = torch.arange(1, target_distribution.size(1) + 1, device=target_distribution.device,
+                                    dtype=target_distribution.dtype)
+        score = torch.sum(target_norm * score_levels, dim=1)
+        return score
+
+    def ava_target_to_quality_onehot(self, target, target_is_distribution=True):
+        if target_is_distribution:
+            score = self.ava_distribution_to_score(target)
+        else:
+            score = target
+        quality_label = self.ava_score_to_quality_label(score)
+        quality_onehot = F.one_hot(quality_label, num_classes=self.num_quality_prompts).float()
+        return quality_label, quality_onehot
+
+    def compute_prompt_loss(self, similarity_scores, target, target_is_distribution=True):
+        quality_label, quality_onehot = self.ava_target_to_quality_onehot(
+            target,
+            target_is_distribution=target_is_distribution
+        )
+        logits = similarity_scores / self.prompt_loss_temperature
+        log_prob = F.log_softmax(logits, dim=-1)
+        loss_prompt = -(quality_onehot * log_prob).sum(dim=-1).mean()
+        return loss_prompt, quality_label, quality_onehot
+
+    # def get_prompt_concat_param_groups(self):
+    #     adapter_params = list(self.adapter_1.parameters()) + list(self.adapter_2.parameters()) + \
+    #                      list(self.adapter_3.parameters()) + list(self.adapter_4.parameters())
+    #     head_v_params = list(self.head_v.parameters())
+    #     prompt_fusion_params = list(self.prompt_fusion.parameters())
+    #     quality_prompt_params = [self.quality_prompt_embeddings]
+    #     return [
+    #         {"params": adapter_params, "lr": 1e-4},
+    #         {"params": head_v_params, "lr": 1e-4},
+    #         {"params": prompt_fusion_params, "lr": 1e-4},
+    #         {"params": quality_prompt_params, "lr": 3e-4},
+    #     ]
+
+    def get_anchored_prompt_param_groups(self):
+        adapter_params = list(self.adapter_1.parameters()) + list(self.adapter_2.parameters()) + \
+                         list(self.adapter_3.parameters()) + list(self.adapter_4.parameters())
+        head_v_params = list(self.head_v.parameters())
+        prompt_fusion_params = list(self.prompt_fusion.parameters())
+        prompt_context_params = [self.prompt_context]
+        prompt_gate_params = [self.prompt_gate]
+        return [
+            {"params": adapter_params, "lr": 1e-4},
+            {"params": head_v_params, "lr": 1e-4},
+            {"params": prompt_fusion_params, "lr": 1e-4},
+            {"params": prompt_context_params, "lr": 2e-4},
+            {"params": prompt_gate_params, "lr": 1e-3},
+        ]
+
+    def get_anchored_prompt_cross_attention_param_groups(self):
+        adapter_params = list(self.adapter_1.parameters()) + list(self.adapter_2.parameters()) + \
+                         list(self.adapter_3.parameters()) + list(self.adapter_4.parameters())
+        head_v_params = list(self.head_v.parameters())
+        prompt_context_params = [self.prompt_context]
+        cross_attn_params = (
+            list(self.prompt_cross_attn.parameters()) +
+            list(self.prompt_cross_norm1.parameters()) +
+            list(self.prompt_cross_norm2.parameters()) +
+            list(self.prompt_cross_ffn.parameters())
+        )
+        return [
+            {"params": adapter_params, "lr": 1e-4},
+            {"params": head_v_params, "lr": 1e-4},
+            {"params": prompt_context_params, "lr": 2e-4},
+            {"params": cross_attn_params, "lr": 1e-4},
+            {"params": [self.prompt_cross_gate], "lr": 1e-3, "weight_decay": 0.0},
+        ]
+
+    def get_anchored_prompt_token_cross_attention_param_groups(self):
+        adapter_params = list(self.adapter_1.parameters()) + list(self.adapter_2.parameters()) + \
+                         list(self.adapter_3.parameters()) + list(self.adapter_4.parameters())
+        head_v_params = list(self.head_v.parameters())
+        prompt_context_params = [self.prompt_context]
+        token_cross_attn_params = (
+            list(self.prompt_token_cross_attn.parameters()) +
+            list(self.prompt_token_cross_norm1.parameters()) +
+            list(self.prompt_token_cross_norm2.parameters()) +
+            list(self.prompt_token_cross_ffn.parameters())
+        )
+        return [
+            {"params": adapter_params, "lr": 1e-4},
+            {"params": head_v_params, "lr": 1e-4},
+            {"params": prompt_context_params, "lr": 2e-4},
+            {"params": token_cross_attn_params, "lr": 1e-4},
+            {"params": [self.prompt_token_cross_gate], "lr": 1e-3, "weight_decay": 0.0},
+        ]
 
     def test_img(self, image):
         with torch.no_grad():

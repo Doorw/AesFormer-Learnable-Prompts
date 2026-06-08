@@ -11,7 +11,7 @@ from models.aesformer import Swin_Bert_vlmo_clip, Swin_Bert_vlmo_clip_mean_score
 
 from dataset import AVA_Comment_Dataset_bert
 from util import AverageMeter, EDMLoss_r1, compute_mae_rmse, set_up_seed
-import option
+import option as option
 import warnings
 warnings.filterwarnings('ignore')
 

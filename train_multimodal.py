@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+"""
+多模态图像美学评估训练脚本
+使用 Swin Transformer 和 BERT 进行图像和文本的联合训练
+支持图像、文本和平均分数的预测
+"""
+
 import os
 import sys
 from tqdm import tqdm
@@ -7,32 +14,38 @@ from torch.utils.data import DataLoader
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import accuracy_score
 import torch.optim.lr_scheduler as lr_scheduler
-from models.aesformer import Swin_Bert_vlmo_clip_mean_score
-from dataset import AVA_Comment_Dataset, AVA_Comment_Dataset_bert, AVA_Comment_Dataset_vit_bert
+from models.aesformer import Swin_Bert_vlmo_clip_mean_score_multi_features
+from dataset import AVA_Comment_Dataset, AVA_Comment_Dataset_bert, AVA_Comment_Dataset_vit_bert,AVA_Comment_LMDB_Dataset
 from util import EDMLoss, AverageMeter, set_up_seed, EDMLoss_r1
-import option
+import option as option
 import warnings
 warnings.filterwarnings('ignore')
 
 
+# 初始化选项
 opt = option.init()
-opt.save_path = ''
-f = open(f'{opt.save_path}/log_test.txt', 'a')
-opt.device = torch.device("cuda:{}".format(3))
-opt.type = 'both'
-opt.batch_size = 16
-opt.lr = 1e-5
-opt.epochs = 50
+#opt.save_path = ''  # 保存路径，需设置
+f = open(f'{opt.save_path}/log_test.txt', 'a')  # 日志文件
+# opt.device = torch.device("cuda:{}".format(3))  # 使用 GPU 3
+opt.type = 'both'  # 模型类型
+opt.batch_size = 16  # 批大小
+opt.lr = 1e-5  # 学习率
+opt.epochs = 25  # 训练轮数
 
-def adjust_learning_rate(params, optimizer, epoch):
-    """Sets the learning rate to the initial LR
-       decayed by 10 every 30 epochs"""
-    lr = params.init_lr * (0.1 ** (epoch // 30))
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = lr
+# def adjust_learning_rate(init_lr, optimizer, epoch):
+#     """
+#     调整学习率，每20个epoch衰减10倍
+#     """
+#     lr = init_lr * (0.1 ** (epoch // 20))
+#     for param_group in optimizer.param_groups:
+#         param_group['lr'] = lr
 
 
 def get_score(opt, y_pred):
+    """
+    根据预测分布计算加权分数
+    使用权重从1到10对应评分1到10
+    """
     w = torch.from_numpy(np.linspace(1, 10, 10))
     w = w.type(torch.FloatTensor)
     w = w.to(opt.device)
@@ -45,18 +58,59 @@ def get_score(opt, y_pred):
 
 
 def create_data_part(opt):
-    train_csv_path = os.path.join(opt.path_to_save_csv, 'train.csv')
-    test_csv_path = os.path.join(opt.path_to_save_csv, 'test.csv')
-
-    train_ds = AVA_Comment_Dataset_bert(train_csv_path, opt.path_to_images, if_train=True)
-    test_ds = AVA_Comment_Dataset_bert(test_csv_path, opt.path_to_images, if_train=False)
-
-    train_loader = DataLoader(train_ds, batch_size=opt.batch_size, num_workers=opt.num_workers, shuffle=True, drop_last=True)
-    test_loader = DataLoader(test_ds, batch_size=opt.batch_size, num_workers=opt.num_workers, shuffle=False)
-
+    """创建训练和测试数据加载器，支持LMDB"""
+    
+    if opt.use_lmdb:  # 新增配置项
+        # LMDB模式
+        train_lmdb = os.path.join(opt.path_to_data, 'Train.lmdb')
+        test_lmdb = os.path.join(opt.path_to_data, 'Test.lmdb')
+         
+        train_ds = AVA_Comment_LMDB_Dataset(
+            train_lmdb, 
+            if_train=True
+        )
+        test_ds = AVA_Comment_LMDB_Dataset(
+            test_lmdb, 
+            if_train=False
+        )
+    else:
+        # CSV模式（原逻辑）
+        train_csv = os.path.join(opt.path_to_save_csv, 'train.csv')
+        test_csv = os.path.join(opt.path_to_save_csv, 'test.csv')
+        
+        train_ds = AVA_Comment_Dataset_bert(
+            train_csv, 
+            opt.path_to_images, 
+            if_train=True
+        )
+        test_ds = AVA_Comment_Dataset_bert(
+            test_csv, 
+            opt.path_to_images, 
+            if_train=False
+        )
+    
+    train_loader = DataLoader(
+        train_ds, 
+        batch_size=opt.batch_size, 
+        num_workers=opt.num_workers, 
+        shuffle=True, 
+        drop_last=True
+    )
+    test_loader = DataLoader(
+        test_ds, 
+        batch_size=opt.batch_size, 
+        num_workers=opt.num_workers, 
+        shuffle=False
+    )
+    
     return train_loader, test_loader
 
 def train_first_stage_mean_score(opt, epoch, model, loader, optimizer, criterion):
+    """
+    第一阶段训练函数，使用平均分数
+    训练图像和文本分支，并计算损失
+    返回训练损失和评估指标
+    """
     model.train()
     emd_losses = AverageMeter()
     img_losses = AverageMeter()
@@ -98,6 +152,7 @@ def train_first_stage_mean_score(opt, epoch, model, loader, optimizer, criterion
         mean_pred_score += mean_pscore_np.tolist()
         true_score += tscore_np.tolist()
 
+    # 计算评估指标
     img_plcc_mean = pearsonr(img_pred_score, true_score)
     img_srcc_mean = spearmanr(img_pred_score, true_score)
     text_plcc_mean = pearsonr(text_pred_score, true_score)
@@ -131,6 +186,10 @@ def train_first_stage_mean_score(opt, epoch, model, loader, optimizer, criterion
 
 @torch.no_grad()
 def validate(opt, epoch, model, loader, criterion):
+    """
+    验证函数，计算测试集上的指标
+    不进行梯度更新
+    """
     model.eval()
     img_losses = AverageMeter()
     text_losses = AverageMeter()
@@ -197,6 +256,9 @@ def validate(opt, epoch, model, loader, criterion):
 
 
 def full_queue(model, loader):
+    """
+    填充模型的队列，用于某些模型的预处理
+    """
     loader = tqdm(loader)
     for idx, (img, text, y) in enumerate(loader):
         img = img.to(opt.device)
@@ -205,12 +267,16 @@ def full_queue(model, loader):
         model.full_queue(img, text)
 
 def start_train(opt):
+    """
+    开始训练过程
+    初始化模型、优化器、调度器，循环训练并保存最佳模型
+    """
     train_loader, test_loader = create_data_part(opt)
     type = opt.type
-    model = Swin_Bert_vlmo_clip_mean_score(device=opt.device, depth=2, model_type='base', type=type).to(opt.device)
+    model = Swin_Bert_vlmo_clip_mean_score_multi_features(device=opt.device, depth=2, model_type='base', type=type).to(opt.device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=opt.lr, betas=(0.9, 0.99))
-    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=1e-6)
+    scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=opt.epochs, eta_min=1e-6)
 
     criterion = EDMLoss().to(opt.device)
 
@@ -249,14 +315,16 @@ def start_train(opt):
         f.write(
             'epoch:%d,mean: lcc:%.3f,srcc:%.3f,acc:%.3f, tlcc:%.3f,tsrcc:%.3f,tacc:%.3f\r\n'
             % (e, plcc['mean'], srcc['mean'], acc['mean'], test_plcc['mean'], test_srcc['mean'], test_acc['mean']))
-
+        f.write('\r\n')
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch {e}, LR: {current_lr:.2e}")
         f.flush()
 
     f.close()
 
 if __name__ == "__main__":
-    #### train model
+    #### 训练模型
     set_up_seed()
     start_train(opt)
-    #### test model
+    #### 测试模型
     # start_check_model(opt)
