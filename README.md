@@ -1,29 +1,63 @@
-# AesFormer
   
-> Mixture-of-Modality-Experts for Unified Image Aesthetic Assessment with Multi-Level Adaptation
 
-## Abstract
-Image aesthetic assessment (IAA) is challenging, because human’s judgement of aesthetic is a metaphysical integration of multi-level information, including color, composition, and semantic. Most existing methods try to learn such information merely from images for the Vision-only IAA (VIAA) task. Recently, a number of Multi-modal IAA (MIAA) methods have been proposed to additionally explore text comments for capturing comprehensive information. However, these MIAA methods are not applicable or show limited performance, when there are no text comments available. To combat this challenge, we propose a unified IAA framework, termed AesFormer, by using mixtures of vision-language Transformers. Specially, AesFormer first learns aligned image-text representations through contrastive learning, and uses a vision-language head for MIAA prediction. Afterward, we propose a multi-level adaptation method to adapt the learned MIAA model to the case without text comments, and use another vision head for VIAA prediction. Extensive experiments are conducted on the AVA, Photo.net, and JAS datasets. The results show that AesFormer significantly outperforms previous methods in both MIAA and VIAA tasks, on all datasets. Remarkably, all the three main metrics, including the classification accuracy, PLCC, and SRCC, break through 90\% for the first time, on the AVA dataset. Our codes and models have been released online at: https://github.com/AiArt-HDU/aesformer.
+# AesFormer Reproduction and Learnable Quality Prompts
+
+This repository contains a reproduction of AesFormer for image aesthetic assessment and additional experiments with Learnable Quality Prompts.
+
+## Project Overview
+
+This project focuses on multi-modal image aesthetic assessment (MIAA) and vision-only image aesthetic assessment (VIAA). The baseline model follows AesFormer, which uses Swin Transformer as the image encoder and BERT as the text encoder. Based on the VIAA stage, this project further introduces Learnable Quality Prompts to provide quality-level semantic guidance.
+
+## Main Features
+
+- Reproduction of AesFormer MIAA and VIAA stages
+- LMDB-based dataset construction for DPC-Captions / AVA-Captions
+- Data preprocessing ablation experiments
+- Learnable Quality Prompts for VIAA
+- Concat, Global Cross-Attention, and Token-Level Cross-Attention prompt fusion
+- EMD distribution visualization with GT, Pred, and Overlap
 
 
-## Comparison with SOTAs
+## Exeperiment results
+![MIAA](figures/Miaa.png)
 
-<img width="729" alt="image" src="https://github.com/AiArt-HDU/aesformer/blob/main/miaa.png">
+![VIAA](figures/Viaa.png)
 
-<img width="729" alt="image" src="https://github.com/AiArt-HDU/aesformer/blob/main/viaa.png">
+![EMD visualization](figures/visualization.png)
 
-## Attention Visualization
-<img width="729" alt="image" src="https://github.com/AiArt-HDU/aesformer/assets/101108289/a5fb6839-6ee8-4a5b-a3be-7db35327056e">
+## Results Of Different Data Preprocessing Methods
+![MIAA](figures/preprocessing_miaa.png)
 
-<img width="732" alt="image" src="https://github.com/AiArt-HDU/aesformer/assets/101108289/5923b4d8-809e-4c53-80de-100b4f393e73">
+![VIAA](figures/preprocessing_viaa.png)
+## Environment
 
+```bash
+conda create -n aesformer python=3.9
+conda activate aesformer
+pip install -r requirements.txt
 
+## Dataset Preparation
 
-## Prerequisites
-- Linux or macOS
-- Python 3.8
-- Pytorch 1.8
-- CPU or NVIDIA GPU + CUDA CuDNN
+python convert_to_lmdb.py
 
-## Pretrained Models
-- Aesformer-T : [[Baidu CLoud](https://pan.baidu.com/s/1U1EQyr76-q8AkCvawWz9mQ )] pwd:6guc
+## MIAA Training
+
+python train_multimodal.py
+
+## VIAA Training
+
+python train_img.py
+
+## Visualization
+
+python visualize_emd_predictions.py \
+    --csv_path ./data/test.csv \
+    --checkpoint ./results/best_mean_srcc.pth \
+    --output_dir ./vis_results \
+    --max_samples 100 \
+    --branch mean
+
+## Notes
+
+Large files such as datasets, LMDB files, pretrained weights, and checkpoints are not included in this repository.
+
