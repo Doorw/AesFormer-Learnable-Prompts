@@ -8,10 +8,12 @@ This repository contains a reproduction of AesFormer for image aesthetic assessm
 
 This project focuses on multi-modal image aesthetic assessment (MIAA) and vision-only image aesthetic assessment (VIAA). The baseline model follows AesFormer, which uses Swin Transformer as the image encoder and BERT as the text encoder. Based on the VIAA stage, this project further introduces Learnable Quality Prompts to provide quality-level semantic guidance.
 
+![MIAA](figures/MIAA.png)![VIAA](figures/VIAA.png)
+
 ## Main Features
 
 - Reproduction of AesFormer MIAA and VIAA stages
-- LMDB-based dataset construction for DPC-Captions / AVA-Captions
+- LMDB-based dataset construction for AVA-Captions
 - Data preprocessing ablation experiments
 - Learnable Quality Prompts for VIAA
 - Concat, Global Cross-Attention, and Token-Level Cross-Attention prompt fusion
